@@ -1,0 +1,29 @@
+name: Mirror only
+
+on:
+  push:
+    branches: ["master"]        # срабатывает при Sync fork или коммите
+  workflow_dispatch:            # можно запустить вручную
+
+env:
+  SOURCE_IMAGE: louislam/uptime-kuma:latest
+  TARGET_IMAGE: ghcr.io/yabloky/uptime-kuma:latest
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull and push image
+        run: |
+          docker pull "${{ env.SOURCE_IMAGE }}"
+          docker tag  "${{ env.SOURCE_IMAGE }}" "${{ env.TARGET_IMAGE }}"
+          docker push "${{ env.TARGET_IMAGE }}"
