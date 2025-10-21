@@ -20,14 +20,19 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq gh
 
-      - name: Get last 2 versions
+      - name: Get last 2 stable versions
         id: versions
         run: |
-          VERSIONS=$(curl -s https://api.github.com/repos/${SOURCE_REPO}/releases | jq -r '.[0:2] | .[].tag_name')
+          VERSIONS=$(curl -s https://api.github.com/repos/${SOURCE_REPO}/releases \
+            | jq -r '[ .[] 
+                | select(.tag_name 
+                  | test("^[vV]?[0-9]+(\\.[0-9]+)*$")) ][0:2] 
+                | .[].tag_name' \
+            | sed 's/^v//')
           echo "versions<<EOF" >> $GITHUB_OUTPUT
           echo "$VERSIONS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-          echo "Found versions:"
+          echo "Found stable versions:"
           echo "$VERSIONS"
 
       - name: Log in to GHCR
