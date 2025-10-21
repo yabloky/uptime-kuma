@@ -42,9 +42,9 @@ jobs:
           TARGET="${{ env.TARGET_REPO }}"
           SOURCE="${{ env.SOURCE_REPO }}"
 
-          # список локальных тегов
+          # список локальных тегов (фильтруем null/пустые)
           LOCAL_VERSIONS=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/uptime-kuma/versions \
-            | jq -r '.[].metadata.container.tags[0]' | grep -v latest | sort -Vr || true)
+            | jq -r '.[].metadata.container.tags[0]' | grep -v -E '^$|null' | sort -Vr || true)
           echo "Local versions:"
           echo "$LOCAL_VERSIONS"
 
@@ -52,7 +52,7 @@ jobs:
           while read -r VERSION; do
             [ -z "$VERSION" ] && continue
             if echo "$LOCAL_VERSIONS" | grep -q "^$VERSION$"; then
-              echo "Already have $VERSION, skipping"
+              echo "Already have $VERSION, skipping pull/push"
               continue
             fi
             echo "-----> New version detected: $VERSION"
@@ -61,9 +61,9 @@ jobs:
             docker push "${TARGET}:$VERSION"
           done <<< "${{ steps.versions.outputs.versions }}"
 
-          # удаляем всё старше 2 версий
+          # пересчитываем локальные теги
           LOCAL_VERSIONS=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/uptime-kuma/versions \
-            | jq -r '.[].metadata.container.tags[0]' | grep -v latest | sort -Vr || true)
+            | jq -r '.[].metadata.container.tags[0]' | grep -v -E '^$|null' | sort -Vr || true)
           COUNT=$(echo "$LOCAL_VERSIONS" | wc -l)
           if [ "$COUNT" -gt 2 ]; then
             OLDEST=$(echo "$LOCAL_VERSIONS" | tail -n +3)
@@ -77,6 +77,11 @@ jobs:
 
           # обновляем latest
           LATEST=$(echo "${{ steps.versions.outputs.versions }}" | head -n 1)
+          if ! docker image inspect "${TARGET}:$LATEST" >/dev/null 2>&1; then
+            echo "TARGET:$LATEST not local, pulling from registry"
+            docker pull "${TARGET}:$LATEST" || docker pull "${SOURCE}:$LATEST"
+            docker tag "${SOURCE}:$LATEST" "${TARGET}:$LATEST" 2>/dev/null || true
+          fi
           docker tag "${TARGET}:$LATEST" "${TARGET}:latest"
           docker push "${TARGET}:latest"
         env:
