@@ -2,12 +2,12 @@ name: Mirror image after commit
 
 on:
   push:
-    branches: ["master"]        # срабатывает при Sync fork или коммите
-  workflow_dispatch:            # можно запустить вручную
+    branches: ["master"]
+  workflow_dispatch:
 
 env:
-  SOURCE_IMAGE: louislam/uptime-kuma:latest
-  TARGET_IMAGE: ghcr.io/yabloky/uptime-kuma:latest
+  SOURCE_REPO: louislam/uptime-kuma
+  TARGET_REPO: ghcr.io/yabloky/uptime-kuma
 
 jobs:
   mirror:
@@ -15,6 +15,13 @@ jobs:
     permissions:
       packages: write
     steps:
+      - name: Get latest tag from upstream
+        id: get_tag
+        run: |
+          TAG=$(curl -s https://api.github.com/repos/${SOURCE_REPO}/releases/latest | jq -r .tag_name)
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Latest version: $TAG"
+
       - name: Log in to GHCR
         uses: docker/login-action@v2
         with:
@@ -24,6 +31,11 @@ jobs:
 
       - name: Pull and push image
         run: |
-          docker pull "${{ env.SOURCE_IMAGE }}"
-          docker tag  "${{ env.SOURCE_IMAGE }}" "${{ env.TARGET_IMAGE }}"
-          docker push "${{ env.TARGET_IMAGE }}"
+          docker pull "${{ env.SOURCE_REPO }}:${{ steps.get_tag.outputs.tag }}"
+          docker tag  "${{ env.SOURCE_REPO }}:${{ steps.get_tag.outputs.tag }}" "${{ env.TARGET_REPO }}:${{ steps.get_tag.outputs.tag }}"
+          docker tag  "${{ env.SOURCE_REPO }}:${{ steps.get_tag.outputs.tag }}" "${{ env.TARGET_REPO }}:latest"
+          docker push "${{ env.TARGET_REPO }}:${{ steps.get_tag.outputs.tag }}"
+          docker push "${{ env.TARGET_REPO }}:latest"
+
+      - name: Show pushed image version
+        run: echo "✅ Mirrored version: ${{ steps.get_tag.outputs.tag }}"
