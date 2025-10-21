@@ -17,16 +17,18 @@ jobs:
     steps:
       - name: Install jq
         run: |
-          sudo apt-get update
+          sudo apt-get update -y
           sudo apt-get install -y jq
 
-      - name: Get latest tag from upstream
-        id: get_tag
+      - name: Get last 3 versions
+        id: versions
         run: |
-          TAG=$(curl -s "https://api.github.com/repos/${SOURCE_REPO}/releases/latest" | jq -r .tag_name)
-          # if upstream returns null/empty, keep it empty (we'll fallback later)
-          echo "tag=$TAG" >> "${GITHUB_OUTPUT}"
-          echo "Latest version detected: $TAG"
+          VERSIONS=$(curl -s https://api.github.com/repos/${SOURCE_REPO}/releases | jq -r '.[0:3] | .[].tag_name')
+          echo "versions<<EOF" >> $GITHUB_OUTPUT
+          echo "$VERSIONS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "Found versions:"
+          echo "$VERSIONS"
 
       - name: Log in to GHCR
         uses: docker/login-action@v2
@@ -35,21 +37,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull and push image
+      - name: Mirror last 3 versions
         run: |
-          SOURCE="${SOURCE_REPO}"
-          TARGET="${TARGET_REPO}"
-          TAG="${{ steps.get_tag.outputs.tag }}"
-          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
-            echo "No upstream tag found, falling back to 'latest'"
-            TAG="latest"
-          fi
-          echo "Using SOURCE=${SOURCE}:${TAG} -> TARGET=${TARGET}:${TAG} (also tagging :latest)"
-          docker pull "${SOURCE}:${TAG}"
-          docker tag  "${SOURCE}:${TAG}" "${TARGET}:${TAG}"
-          docker tag  "${SOURCE}:${TAG}" "${TARGET}:latest"
-          docker push "${TARGET}:${TAG}"
-          docker push "${TARGET}:latest"
+          while read -r VERSION; do
+            [ -z "$VERSION" ] && continue
+            echo "-----> Mirroring version: $VERSION"
+            docker pull "${{ env.SOURCE_REPO }}:$VERSION"
+            docker tag  "${{ env.SOURCE_REPO }}:$VERSION" "${{ env.TARGET_REPO }}:$VERSION"
+            docker push "${{ env.TARGET_REPO }}:$VERSION"
+          done <<< "${{ steps.versions.outputs.versions }}"
 
-      - name: Show pushed image version
-        run: echo "✅ Mirrored version: ${{ steps.get_tag.outputs.tag }}"
+          # Тег latest — для самой свежей версии
+          LATEST=$(echo "${{ steps.versions.outputs.versions }}" | head -n 1)
+          docker tag "${{ env.SOURCE_REPO }}:$LATEST" "${{ env.TARGET_REPO }}:latest"
+          docker push "${{ env.TARGET_REPO }}:latest"
