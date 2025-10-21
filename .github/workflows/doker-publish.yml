@@ -18,12 +18,12 @@ jobs:
       - name: Install jq
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y jq
+          sudo apt-get install -y jq gh
 
-      - name: Get last 3 versions
+      - name: Get last 2 versions
         id: versions
         run: |
-          VERSIONS=$(curl -s https://api.github.com/repos/${SOURCE_REPO}/releases | jq -r '.[0:3] | .[].tag_name')
+          VERSIONS=$(curl -s https://api.github.com/repos/${SOURCE_REPO}/releases | jq -r '.[0:2] | .[].tag_name')
           echo "versions<<EOF" >> $GITHUB_OUTPUT
           echo "$VERSIONS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
@@ -37,17 +37,47 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Mirror last 3 versions
+      - name: Mirror last 2 versions
         run: |
+          TARGET="${{ env.TARGET_REPO }}"
+          SOURCE="${{ env.SOURCE_REPO }}"
+
+          # список локальных тегов
+          LOCAL_VERSIONS=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/uptime-kuma/versions \
+            | jq -r '.[].metadata.container.tags[0]' | grep -v latest | sort -Vr || true)
+          echo "Local versions:"
+          echo "$LOCAL_VERSIONS"
+
+          # тянем и пушим только новые
           while read -r VERSION; do
             [ -z "$VERSION" ] && continue
-            echo "-----> Mirroring version: $VERSION"
-            docker pull "${{ env.SOURCE_REPO }}:$VERSION"
-            docker tag  "${{ env.SOURCE_REPO }}:$VERSION" "${{ env.TARGET_REPO }}:$VERSION"
-            docker push "${{ env.TARGET_REPO }}:$VERSION"
+            if echo "$LOCAL_VERSIONS" | grep -q "^$VERSION$"; then
+              echo "Already have $VERSION, skipping"
+              continue
+            fi
+            echo "-----> New version detected: $VERSION"
+            docker pull "${SOURCE}:$VERSION"
+            docker tag  "${SOURCE}:$VERSION" "${TARGET}:$VERSION"
+            docker push "${TARGET}:$VERSION"
           done <<< "${{ steps.versions.outputs.versions }}"
 
-          # Тег latest — для самой свежей версии
+          # удаляем всё старше 2 версий
+          LOCAL_VERSIONS=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/uptime-kuma/versions \
+            | jq -r '.[].metadata.container.tags[0]' | grep -v latest | sort -Vr || true)
+          COUNT=$(echo "$LOCAL_VERSIONS" | wc -l)
+          if [ "$COUNT" -gt 2 ]; then
+            OLDEST=$(echo "$LOCAL_VERSIONS" | tail -n +3)
+            for OLD in $OLDEST; do
+              echo "Deleting old version: $OLD"
+              ID=$(gh api -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/uptime-kuma/versions \
+                | jq -r ".[] | select(.metadata.container.tags[0]==\"$OLD\") | .id")
+              gh api --method DELETE -H "Accept: application/vnd.github+json" /users/${{ github.actor }}/packages/container/uptime-kuma/versions/$ID
+            done
+          fi
+
+          # обновляем latest
           LATEST=$(echo "${{ steps.versions.outputs.versions }}" | head -n 1)
-          docker tag "${{ env.SOURCE_REPO }}:$LATEST" "${{ env.TARGET_REPO }}:latest"
-          docker push "${{ env.TARGET_REPO }}:latest"
+          docker tag "${TARGET}:$LATEST" "${TARGET}:latest"
+          docker push "${TARGET}:latest"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
