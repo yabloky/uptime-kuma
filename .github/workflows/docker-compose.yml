@@ -1,13 +1,30 @@
-name: Mirror image after commit
+name: Mirror Docker image with inputs
 
 on:
   push:
     branches: ["master"]
   workflow_dispatch:
+    inputs:
+      source_image:
+        description: 'Source image (owner/repo or image name)'
+        required: true
+        default: 'louislam/uptime-kuma'
+      target_image_name:
+        description: 'Target image name in GHCR (e.g., uptime-kuma)'
+        required: true
+        default: 'uptime-kuma'
+      github_api_repo:
+        description: 'GitHub API repo path for releases (owner/repo)'
+        required: true
+        default: 'louislam/uptime-kuma'
+      versions_count:
+        description: 'Number of versions to keep'
+        required: false
+        default: '2'
 
 env:
-  SOURCE_REPO: docker.io/louislam/uptime-kuma
-  TARGET_REPO: ghcr.io/yabloky/uptime-kuma
+  REGISTRY: ghcr.io
+  REGISTRY_USERNAME: ${{ github.actor }}
 
 jobs:
   mirror:
@@ -15,17 +32,32 @@ jobs:
     permissions:
       packages: write
     steps:
+      - name: Set variables from inputs or defaults
+        id: config
+        run: |
+          SOURCE_IMAGE="${{ github.event.inputs.source_image || 'louislam/uptime-kuma' }}"
+          TARGET_IMAGE_NAME="${{ github.event.inputs.target_image_name || 'uptime-kuma' }}"
+          GITHUB_API_REPO="${{ github.event.inputs.github_api_repo || 'louislam/uptime-kuma' }}"
+          VERSIONS_COUNT="${{ github.event.inputs.versions_count || '2' }}"
+          
+          echo "source_image=${SOURCE_IMAGE}" >> $GITHUB_OUTPUT
+          echo "target_image_name=${TARGET_IMAGE_NAME}" >> $GITHUB_OUTPUT
+          echo "github_api_repo=${GITHUB_API_REPO}" >> $GITHUB_OUTPUT
+          echo "versions_count=${VERSIONS_COUNT}" >> $GITHUB_OUTPUT
+          echo "source_full=docker.io/${SOURCE_IMAGE}" >> $GITHUB_OUTPUT
+          echo "target_full=${{ env.REGISTRY }}/${{ env.REGISTRY_USERNAME }}/${TARGET_IMAGE_NAME}" >> $GITHUB_OUTPUT
+
       - name: Install jq
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq gh
 
-      - name: Get last 2 stable versions
+      - name: Get stable versions
         id: versions
         run: |
-          VERSIONS=$(curl -s https://api.github.com/repos/louislam/uptime-kuma/releases \
+          VERSIONS=$(curl -s https://api.github.com/repos/${{ steps.config.outputs.github_api_repo }}/releases \
             | jq -r '.[] | select(.prerelease == false and (.tag_name | test("^[vV]?[0-9]+(\\.[0-9]+)*$"))) | .tag_name' \
-            | head -n 2 \
+            | head -n ${{ steps.config.outputs.versions_count }} \
             | sed 's/^v//')
           echo "versions<<EOF" >> $GITHUB_OUTPUT
           echo "$VERSIONS" >> $GITHUB_OUTPUT
@@ -36,19 +68,19 @@ jobs:
       - name: Log in to GHCR
         uses: docker/login-action@v2
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ env.REGISTRY_USERNAME }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Mirror last 2 versions
+      - name: Mirror versions
         run: |
-          TARGET="${{ env.TARGET_REPO }}"
-          SOURCE="${{ env.SOURCE_REPO }}"
-          PKG_NAME="uptime-kuma"
+          SOURCE="${{ steps.config.outputs.source_full }}"
+          TARGET="${{ steps.config.outputs.target_full }}"
+          PKG_NAME="${{ steps.config.outputs.target_image_name }}"
 
           LOCAL_VERSIONS=$(gh api -H "Accept: application/vnd.github+json" \
-            /users/${{ github.actor }}/packages/container/${PKG_NAME}/versions \
-            2>/dev/null | jq -r '.[] | select(.metadata.container.tags != null) | .metadata.container.tags[]' \
+            /users/${{ env.REGISTRY_USERNAME }}/packages/container/${PKG_NAME}/versions \
+            2>/dev/null | jq -r '.[] | objects | select(.metadata and .metadata.container and .metadata.container.tags) | .metadata.container.tags[]' \
             | grep -v 'latest' | sort -Vr || true)
           
           echo "Local versions in GHCR:"
@@ -76,32 +108,40 @@ jobs:
           LATEST=$(echo "${{ steps.versions.outputs.versions }}" | head -n 1)
           if [ -n "$LATEST" ]; then
             echo "Tagging version $LATEST as latest"
-            docker pull "${TARGET}:${LATEST}"
-            docker tag "${TARGET}:${LATEST}" "${TARGET}:latest"
+            docker pull "${TARGET}:${LATEST}" 2>/dev/null || docker pull "${SOURCE}:${LATEST}"
+            docker tag "${SOURCE}:${LATEST}" "${TARGET}:latest" 2>/dev/null || docker tag "${TARGET}:${LATEST}" "${TARGET}:latest"
             docker push "${TARGET}:latest"
           fi
 
           CURRENT_VERSIONS=$(gh api -H "Accept: application/vnd.github+json" \
-            /users/${{ github.actor }}/packages/container/${PKG_NAME}/versions \
-            2>/dev/null | jq -r '.[] | select(.metadata.container.tags != null) | .metadata.container.tags[]' \
+            /users/${{ env.REGISTRY_USERNAME }}/packages/container/${PKG_NAME}/versions \
+            2>/dev/null | jq -r '.[] | objects | select(.metadata and .metadata.container and .metadata.container.tags) | .metadata.container.tags[]' \
             | grep -v 'latest' | sort -Vr || true)
           
           COUNT=$(echo "$CURRENT_VERSIONS" | grep -c '^' || echo 0)
-          if [ "$COUNT" -gt 2 ]; then
-            echo "Cleaning up versions. Current count: $COUNT"
-            echo "$CURRENT_VERSIONS" | tail -n +3 | while read -r OLD_VERSION; do
+          KEEP_COUNT=${{ steps.config.outputs.versions_count }}
+          if [ "$COUNT" -gt "$KEEP_COUNT" ]; then
+            echo "Cleaning up versions. Current count: $COUNT, keeping: $KEEP_COUNT"
+            echo "$CURRENT_VERSIONS" | tail -n +$((KEEP_COUNT + 1)) | while read -r OLD_VERSION; do
               [ -z "$OLD_VERSION" ] && continue
               echo "Deleting old version: $OLD_VERSION"
               
               VER_ID=$(gh api -H "Accept: application/vnd.github+json" \
-                /users/${{ github.actor }}/packages/container/${PKG_NAME}/versions \
-                2>/dev/null | jq -r ".[] | select(.metadata.container.tags[] | select(. == \"$OLD_VERSION\")) | .id" | head -n 1)
+                /users/${{ env.REGISTRY_USERNAME }}/packages/container/${PKG_NAME}/versions \
+                2>/dev/null | jq -r ".[] | objects | select(.metadata and .metadata.container and .metadata.container.tags) | select(.metadata.container.tags[] | select(. == \"$OLD_VERSION\")) | .id" | head -n 1)
               
               if [ -n "$VER_ID" ] && [ "$VER_ID" != "null" ]; then
                 gh api --method DELETE -H "Accept: application/vnd.github+json" \
-                  /users/${{ github.actor }}/packages/container/${PKG_NAME}/versions/$VER_ID
+                  /users/${{ env.REGISTRY_USERNAME }}/packages/container/${PKG_NAME}/versions/$VER_ID
               fi
             done
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Workflow summary
+        if: always()
+        run: |
+          echo "Mirror workflow completed"
+          echo "Source: ${{ steps.config.outputs.source_full }}"
+          echo "Target: ${{ steps.config.outputs.target_full }}"
