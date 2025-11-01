@@ -1,0 +1,107 @@
+name: Mirror image after commit
+
+on:
+  push:
+    branches: ["master"]
+  workflow_dispatch:
+
+env:
+  SOURCE_REPO: docker.io/louislam/uptime-kuma
+  TARGET_REPO: ghcr.io/yabloky/uptime-kuma
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Install jq
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq gh
+
+      - name: Get last 2 stable versions
+        id: versions
+        run: |
+          VERSIONS=$(curl -s https://api.github.com/repos/louislam/uptime-kuma/releases \
+            | jq -r '.[] | select(.prerelease == false and (.tag_name | test("^[vV]?[0-9]+(\\.[0-9]+)*$"))) | .tag_name' \
+            | head -n 2 \
+            | sed 's/^v//')
+          echo "versions<<EOF" >> $GITHUB_OUTPUT
+          echo "$VERSIONS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "Found stable versions:"
+          echo "$VERSIONS"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Mirror last 2 versions
+        run: |
+          TARGET="${{ env.TARGET_REPO }}"
+          SOURCE="${{ env.SOURCE_REPO }}"
+          PKG_NAME="uptime-kuma"
+
+          LOCAL_VERSIONS=$(gh api -H "Accept: application/vnd.github+json" \
+            /users/${{ github.actor }}/packages/container/${PKG_NAME}/versions \
+            2>/dev/null | jq -r '.[] | select(.metadata.container.tags != null) | .metadata.container.tags[]' \
+            | grep -v 'latest' | sort -Vr || true)
+          
+          echo "Local versions in GHCR:"
+          echo "$LOCAL_VERSIONS"
+
+          while IFS= read -r VERSION; do
+            [ -z "$VERSION" ] && continue
+            
+            if echo "$LOCAL_VERSIONS" | grep -q "^${VERSION}$"; then
+              echo "Version $VERSION already exists, skipping"
+              continue
+            fi
+            
+            echo "Processing version: $VERSION"
+            
+            if docker pull "${SOURCE}:${VERSION}"; then
+              docker tag "${SOURCE}:${VERSION}" "${TARGET}:${VERSION}"
+              docker push "${TARGET}:${VERSION}"
+              echo "Successfully mirrored version $VERSION"
+            else
+              echo "Failed to pull ${SOURCE}:${VERSION}, skipping"
+            fi
+          done <<< "${{ steps.versions.outputs.versions }}"
+
+          LATEST=$(echo "${{ steps.versions.outputs.versions }}" | head -n 1)
+          if [ -n "$LATEST" ]; then
+            echo "Tagging version $LATEST as latest"
+            docker pull "${TARGET}:${LATEST}"
+            docker tag "${TARGET}:${LATEST}" "${TARGET}:latest"
+            docker push "${TARGET}:latest"
+          fi
+
+          CURRENT_VERSIONS=$(gh api -H "Accept: application/vnd.github+json" \
+            /users/${{ github.actor }}/packages/container/${PKG_NAME}/versions \
+            2>/dev/null | jq -r '.[] | select(.metadata.container.tags != null) | .metadata.container.tags[]' \
+            | grep -v 'latest' | sort -Vr || true)
+          
+          COUNT=$(echo "$CURRENT_VERSIONS" | grep -c '^' || echo 0)
+          if [ "$COUNT" -gt 2 ]; then
+            echo "Cleaning up versions. Current count: $COUNT"
+            echo "$CURRENT_VERSIONS" | tail -n +3 | while read -r OLD_VERSION; do
+              [ -z "$OLD_VERSION" ] && continue
+              echo "Deleting old version: $OLD_VERSION"
+              
+              VER_ID=$(gh api -H "Accept: application/vnd.github+json" \
+                /users/${{ github.actor }}/packages/container/${PKG_NAME}/versions \
+                2>/dev/null | jq -r ".[] | select(.metadata.container.tags[] | select(. == \"$OLD_VERSION\")) | .id" | head -n 1)
+              
+              if [ -n "$VER_ID" ] && [ "$VER_ID" != "null" ]; then
+                gh api --method DELETE -H "Accept: application/vnd.github+json" \
+                  /users/${{ github.actor }}/packages/container/${PKG_NAME}/versions/$VER_ID
+              fi
+            done
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
